@@ -194,7 +194,10 @@ async function callClaude(
     args.push("--resume", session.sessionId);
   }
 
-  args.push("--output-format", "text");
+  // Enable tools: web search, read, bash, etc.
+  args.push("--allowedTools", "WebSearch", "WebFetch", "Read", "Bash", "Glob", "Grep", "Edit", "Write");
+
+  args.push("--output-format", "json");
 
   console.log(`Calling Claude: ${prompt.substring(0, 50)}...`);
 
@@ -219,15 +222,39 @@ async function callClaude(
       return `Error: ${stderr || "Claude exited with code " + exitCode}`;
     }
 
-    // Extract session ID from output if present (for --resume)
-    const sessionMatch = output.match(/Session ID: ([a-f0-9-]+)/i);
-    if (sessionMatch) {
-      session.sessionId = sessionMatch[1];
-      session.lastActivity = new Date().toISOString();
-      await saveSession(session);
+    // Parse JSON output to extract session ID and response text
+    try {
+      const jsonOutput = JSON.parse(output);
+      // Save session ID for conversation continuity
+      if (jsonOutput.session_id) {
+        session.sessionId = jsonOutput.session_id;
+        session.lastActivity = new Date().toISOString();
+        await saveSession(session);
+        console.log(`Session saved: ${session.sessionId}`);
+      }
+      // Extract text from the result - handle both array and string formats
+      if (typeof jsonOutput.result === "string") {
+        return jsonOutput.result.trim();
+      }
+      if (Array.isArray(jsonOutput.result)) {
+        return jsonOutput.result
+          .filter((block: any) => block.type === "text")
+          .map((block: any) => block.text)
+          .join("\n")
+          .trim();
+      }
+      // Fallback: return raw text content
+      return jsonOutput.result?.text || output.trim();
+    } catch {
+      // If JSON parse fails, fall back to text output
+      const sessionMatch = output.match(/Session ID: ([a-f0-9-]+)/i);
+      if (sessionMatch) {
+        session.sessionId = sessionMatch[1];
+        session.lastActivity = new Date().toISOString();
+        await saveSession(session);
+      }
+      return output.trim();
     }
-
-    return output.trim();
   } catch (error) {
     console.error("Spawn error:", error);
     return `Error: Could not run Claude CLI`;
