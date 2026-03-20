@@ -30,6 +30,7 @@ const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID || "";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const PROJECT_DIR = process.env.PROJECT_DIR || "";
 const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claude-relay");
+const PULSEOS_URL = process.env.PULSEOS_URL || "http://localhost:3000";
 
 // Directories
 const TEMP_DIR = join(RELAY_DIR, "temp");
@@ -262,6 +263,62 @@ async function callClaude(
 }
 
 // ============================================================
+// PULSEOS BRIDGE
+// ============================================================
+
+async function mirrorToPulseOS(from: 'user' | 'agent', text: string): Promise<void> {
+  try {
+    await fetch(`${PULSEOS_URL}/api/chat-mirror`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from, text, source: 'telegram', time: new Date().toISOString() })
+    });
+  } catch {
+    // PulseOS offline — silently ignore
+  }
+}
+
+// Poll PulseOS dashboard outbox for messages sent from the browser UI
+async function pollDashboardOutbox(): Promise<void> {
+  while (true) {
+    try {
+      const res = await fetch(`${PULSEOS_URL}/api/chat-outbox`);
+      const data = await res.json() as { messages: Array<{ id: string; message: string; source: string }> };
+      if (data.messages?.length > 0) {
+        for (const msg of data.messages) {
+          console.log(`[PulseOS] Dashboard message: ${msg.message.substring(0, 50)}...`);
+
+          const [relevantContext, memoryContext] = await Promise.all([
+            getRelevantContext(supabase, msg.message),
+            getMemoryContext(supabase),
+          ]);
+
+          const enrichedPrompt = buildPrompt(msg.message, relevantContext, memoryContext);
+          const rawResponse = await callClaude(enrichedPrompt, { resume: true });
+          const response = await processMemoryIntents(supabase, rawResponse);
+
+          await saveMessage("user", `[Dashboard]: ${msg.message}`);
+          await saveMessage("assistant", response);
+          await mirrorToPulseOS('agent', response);
+
+          // Forward to Telegram so the conversation is visible there too
+          try {
+            await bot.api.sendMessage(ALLOWED_USER_ID, `💻 *Dashboard:* ${msg.message}`, { parse_mode: "Markdown" });
+            await bot.api.sendMessage(ALLOWED_USER_ID, response);
+          } catch (e) { console.error("[PulseOS→TG] Forward failed:", e); }
+        }
+      }
+    } catch {
+      // PulseOS offline
+    }
+    await Bun.sleep(5000);
+  }
+}
+
+// Start outbox polling in background
+pollDashboardOutbox();
+
+// ============================================================
 // MESSAGE HANDLERS
 // ============================================================
 
@@ -273,6 +330,9 @@ bot.on("message:text", async (ctx) => {
   await ctx.replyWithChatAction("typing");
 
   await saveMessage("user", text);
+
+  // Mirror user message to PulseOS IMMEDIATELY (before Claude processes)
+  await mirrorToPulseOS('user', text);
 
   // Gather context: semantic search + facts/goals
   const [relevantContext, memoryContext] = await Promise.all([
@@ -288,6 +348,9 @@ bot.on("message:text", async (ctx) => {
 
   await saveMessage("assistant", response);
   await sendResponse(ctx, response);
+
+  // Mirror agent response to PulseOS
+  await mirrorToPulseOS('agent', response);
 });
 
 // Voice messages
@@ -317,6 +380,7 @@ bot.on("message:voice", async (ctx) => {
     }
 
     await saveMessage("user", `[Voice ${voice.duration}s]: ${transcription}`);
+    await mirrorToPulseOS('user', `[Voice]: ${transcription}`);
 
     const [relevantContext, memoryContext] = await Promise.all([
       getRelevantContext(supabase, transcription),
@@ -333,6 +397,7 @@ bot.on("message:voice", async (ctx) => {
 
     await saveMessage("assistant", claudeResponse);
     await sendResponse(ctx, claudeResponse);
+    await mirrorToPulseOS('agent', claudeResponse);
   } catch (error) {
     console.error("Voice error:", error);
     await ctx.reply("Could not process voice message. Check logs for details.");
@@ -365,6 +430,7 @@ bot.on("message:photo", async (ctx) => {
     const prompt = `[Image: ${filePath}]\n\n${caption}`;
 
     await saveMessage("user", `[Image]: ${caption}`);
+    await mirrorToPulseOS('user', `[Image]: ${caption}`);
 
     const claudeResponse = await callClaude(prompt, { resume: true });
 
@@ -374,6 +440,7 @@ bot.on("message:photo", async (ctx) => {
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
     await saveMessage("assistant", cleanResponse);
     await sendResponse(ctx, cleanResponse);
+    await mirrorToPulseOS('agent', cleanResponse);
   } catch (error) {
     console.error("Image error:", error);
     await ctx.reply("Could not process image.");
@@ -402,6 +469,7 @@ bot.on("message:document", async (ctx) => {
     const prompt = `[File: ${filePath}]\n\n${caption}`;
 
     await saveMessage("user", `[Document: ${doc.file_name}]: ${caption}`);
+    await mirrorToPulseOS('user', `[Document: ${doc.file_name}]: ${caption}`);
 
     const claudeResponse = await callClaude(prompt, { resume: true });
 
@@ -410,6 +478,7 @@ bot.on("message:document", async (ctx) => {
     const cleanResponse = await processMemoryIntents(supabase, claudeResponse);
     await saveMessage("assistant", cleanResponse);
     await sendResponse(ctx, cleanResponse);
+    await mirrorToPulseOS('agent', cleanResponse);
   } catch (error) {
     console.error("Document error:", error);
     await ctx.reply("Could not process document.");
