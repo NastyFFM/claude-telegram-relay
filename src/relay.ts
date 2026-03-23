@@ -339,6 +339,14 @@ async function sendProactiveMessage(text: string, type: 'briefing' | 'checkin' |
     await bot.api.sendMessage(ALLOWED_USER_ID, fullText);
   } catch (e) { console.error(`[Proactive→TG] Send failed:`, e); }
   await mirrorToPulseOS('agent', fullText);
+  // Also send as agent-alert for Agent-Bar pulsing
+  try {
+    await fetch(`${PULSEOS_URL}/api/agent-alert`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: fullText, type, source: 'claudeos' })
+    });
+  } catch { /* PulseOS offline */ }
   await saveMessage('assistant', `[${type}] ${text}`);
   console.log(`[Proactive] Sent ${type}: ${text.substring(0, 60)}...`);
 }
