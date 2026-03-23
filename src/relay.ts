@@ -287,6 +287,7 @@ async function pollDashboardOutbox(): Promise<void> {
       if (data.messages?.length > 0) {
         for (const msg of data.messages) {
           console.log(`[PulseOS] Dashboard message: ${msg.message.substring(0, 50)}...`);
+          proactiveState.lastUserMessage = Date.now();
 
           // PulseOS context is cached (refreshed every 5 min via interval) — no per-message refresh needed
           const [relevantContext, memoryContext] = await Promise.all([
@@ -320,6 +321,131 @@ async function pollDashboardOutbox(): Promise<void> {
 pollDashboardOutbox();
 
 // ============================================================
+// PROACTIVE AGENT SCHEDULER
+// ============================================================
+
+const proactiveState = {
+  lastBriefingDate: '',
+  lastCheckinTime: 0,
+  checkinCount: 0,
+  checkinDate: '',
+  lastUserMessage: Date.now(),
+};
+
+async function sendProactiveMessage(text: string, type: 'briefing' | 'checkin' | 'alert'): Promise<void> {
+  const prefix = type === 'briefing' ? '☀️' : type === 'checkin' ? '💡' : '🔔';
+  const fullText = `${prefix} ${text}`;
+  try {
+    await bot.api.sendMessage(ALLOWED_USER_ID, fullText);
+  } catch (e) { console.error(`[Proactive→TG] Send failed:`, e); }
+  await mirrorToPulseOS('agent', fullText);
+  await saveMessage('assistant', `[${type}] ${text}`);
+  console.log(`[Proactive] Sent ${type}: ${text.substring(0, 60)}...`);
+}
+
+async function checkMorningBriefing(): Promise<void> {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+  const today = now.toISOString().slice(0, 10);
+
+  // Only trigger between 8:55 and 9:05, once per day
+  if (hours !== 9 && !(hours === 8 && minutes >= 55)) return;
+  if (hours === 9 && minutes > 5) return;
+  if (proactiveState.lastBriefingDate === today) return;
+
+  proactiveState.lastBriefingDate = today;
+  console.log('[Proactive] Triggering morning briefing...');
+
+  try {
+    // Refresh context to get latest data
+    await refreshPulseOSContext();
+
+    const briefingPrompt = [
+      'Erstelle ein kurzes, freundliches Morning Briefing für den User.',
+      'Fasse zusammen was heute ansteht basierend auf dem PulseOS-Kontext.',
+      'Halte es unter 200 Wörtern. Erwähne: anstehende Tasks, Kalender-Events, offene Goals.',
+      'Wenn nichts ansteht, wünsche einfach einen guten Tag.',
+      `Current time: ${now.toLocaleString('de-DE', { timeZone: USER_TIMEZONE, weekday: 'long', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' })}`,
+    ];
+    if (pulseOSContext) briefingPrompt.push(`\n${pulseOSContext}`);
+
+    const rawResponse = await callClaude(briefingPrompt.join('\n'));
+    const response = await processMemoryIntents(supabase, rawResponse);
+    await sendProactiveMessage(response, 'briefing');
+  } catch (e) {
+    console.error('[Proactive] Briefing failed:', e);
+  }
+}
+
+async function checkSmartCheckin(): Promise<void> {
+  const now = new Date();
+  const hours = now.getHours();
+  const today = now.toISOString().slice(0, 10);
+
+  // Reset daily counter
+  if (proactiveState.checkinDate !== today) {
+    proactiveState.checkinDate = today;
+    proactiveState.checkinCount = 0;
+  }
+
+  // Quiet hours: no check-ins between 22:00 and 8:00
+  if (hours < 8 || hours >= 22) return;
+
+  // Max 3 check-ins per day
+  if (proactiveState.checkinCount >= 3) return;
+
+  // Only check in if user has been inactive for 2+ hours
+  const inactiveMs = Date.now() - proactiveState.lastUserMessage;
+  if (inactiveMs < 2 * 60 * 60 * 1000) return;
+
+  // Minimum 30 min between check-ins
+  if (Date.now() - proactiveState.lastCheckinTime < 30 * 60 * 1000) return;
+
+  console.log('[Proactive] Evaluating smart check-in...');
+
+  try {
+    await refreshPulseOSContext();
+
+    const checkinPrompt = [
+      'Du bist ein proaktiver Assistent. Entscheide ob du den User jetzt kontaktieren solltest.',
+      'Antworte NUR mit einem JSON-Objekt: {"shouldCheckin": true/false, "message": "deine Nachricht"}',
+      'Gründe für Check-in: Deadline naht, offener Task seit Tagen, Meeting bald, oder einfach ein freundlicher Check-in.',
+      'Gründe dagegen: Nichts Dringendes, bereits heute gecheckt, User ist wahrscheinlich beschäftigt.',
+      `Der User war seit ${Math.round(inactiveMs / 60000)} Minuten inaktiv.`,
+      `Heutige Check-ins bisher: ${proactiveState.checkinCount}`,
+      `Aktuelle Zeit: ${now.toLocaleString('de-DE', { timeZone: USER_TIMEZONE, hour: '2-digit', minute: '2-digit', weekday: 'long' })}`,
+    ];
+    if (pulseOSContext) checkinPrompt.push(`\nPulseOS-Kontext:\n${pulseOSContext}`);
+
+    const rawResponse = await callClaude(checkinPrompt.join('\n'));
+
+    try {
+      // Extract JSON from response (might have markdown wrapping)
+      const jsonMatch = rawResponse.match(/\{[\s\S]*"shouldCheckin"[\s\S]*\}/);
+      if (jsonMatch) {
+        const decision = JSON.parse(jsonMatch[0]);
+        if (decision.shouldCheckin && decision.message) {
+          proactiveState.checkinCount++;
+          proactiveState.lastCheckinTime = Date.now();
+          await sendProactiveMessage(decision.message, 'checkin');
+        } else {
+          console.log('[Proactive] Check-in skipped (Claude decided not to)');
+        }
+      }
+    } catch {
+      console.log('[Proactive] Could not parse check-in decision');
+    }
+  } catch (e) {
+    console.error('[Proactive] Check-in failed:', e);
+  }
+}
+
+// Run checks periodically
+setInterval(checkMorningBriefing, 60_000);   // Every minute (checks time internally)
+setInterval(checkSmartCheckin, 30 * 60_000); // Every 30 minutes
+
+// ============================================================
 // MESSAGE HANDLERS
 // ============================================================
 
@@ -331,6 +457,7 @@ bot.on("message:text", async (ctx) => {
   await ctx.replyWithChatAction("typing");
 
   await saveMessage("user", text);
+  proactiveState.lastUserMessage = Date.now();
 
   // Mirror user message to PulseOS IMMEDIATELY (before Claude processes)
   await mirrorToPulseOS('user', text);
@@ -546,6 +673,7 @@ function buildPrompt(
 
   const parts = [
     "You are a personal AI assistant responding via Telegram. Keep responses concise and conversational.",
+    "Du bist proaktiv — wenn du merkst dass der User Hilfe brauchen könnte (Deadline naht, Task vergessen, Meeting bald), weise dezent darauf hin. Maximal 2-3 proaktive Hinweise pro Tag. Sei hilfreich, nicht nervig.",
   ];
 
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
