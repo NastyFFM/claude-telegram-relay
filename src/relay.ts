@@ -288,6 +288,7 @@ async function pollDashboardOutbox(): Promise<void> {
         for (const msg of data.messages) {
           console.log(`[PulseOS] Dashboard message: ${msg.message.substring(0, 50)}...`);
 
+          // PulseOS context is cached (refreshed every 5 min via interval) — no per-message refresh needed
           const [relevantContext, memoryContext] = await Promise.all([
             getRelevantContext(supabase, msg.message),
             getMemoryContext(supabase),
@@ -334,7 +335,7 @@ bot.on("message:text", async (ctx) => {
   // Mirror user message to PulseOS IMMEDIATELY (before Claude processes)
   await mirrorToPulseOS('user', text);
 
-  // Gather context: semantic search + facts/goals
+  // PulseOS context is cached (refreshed every 5 min via interval) — no per-message refresh needed
   const [relevantContext, memoryContext] = await Promise.all([
     getRelevantContext(supabase, text),
     getMemoryContext(supabase),
@@ -497,6 +498,33 @@ try {
   // No profile yet — that's fine
 }
 
+// Load PulseOS context dynamically (refreshed every 5 min)
+let pulseOSContext = "";
+let pulseOSContextHash = "";
+let pulseOSContextSentInSession = false;
+async function refreshPulseOSContext(): Promise<void> {
+  try {
+    const res = await fetch(`${PULSEOS_URL}/api/agent-context`);
+    const data = await res.json() as { context: string };
+    const newContext = data.context || "";
+    const newHash = Bun.hash(newContext).toString();
+    if (newHash !== pulseOSContextHash) {
+      pulseOSContext = newContext;
+      pulseOSContextHash = newHash;
+      pulseOSContextSentInSession = false; // force re-send on next message
+      console.log(`[PulseOS] Context changed (${pulseOSContext.length} chars)`);
+    } else {
+      console.log(`[PulseOS] Context unchanged (${pulseOSContext.length} chars)`);
+    }
+  } catch {
+    console.log("[PulseOS] Not reachable — context unavailable");
+    pulseOSContext = "";
+    pulseOSContextHash = "";
+  }
+}
+await refreshPulseOSContext();
+setInterval(refreshPulseOSContext, 5 * 60 * 1000);
+
 const USER_NAME = process.env.USER_NAME || "";
 const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
 
@@ -523,6 +551,13 @@ function buildPrompt(
   if (USER_NAME) parts.push(`You are speaking with ${USER_NAME}.`);
   parts.push(`Current time: ${timeStr}`);
   if (profileContext) parts.push(`\nProfile:\n${profileContext}`);
+  // Only include full PulseOS context on first message or when context changed (--resume keeps session state)
+  if (pulseOSContext && !pulseOSContextSentInSession) {
+    parts.push(`\n${pulseOSContext}`);
+    pulseOSContextSentInSession = true;
+  } else if (pulseOSContext) {
+    parts.push(`\n[PulseOS context already loaded in this session — use cached knowledge. API base: ${PULSEOS_URL}]`);
+  }
   if (memoryContext) parts.push(`\n${memoryContext}`);
   if (relevantContext) parts.push(`\n${relevantContext}`);
 
