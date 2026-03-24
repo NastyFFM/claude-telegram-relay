@@ -289,24 +289,41 @@ async function pollDashboardOutbox(): Promise<void> {
           console.log(`[PulseOS] Dashboard message: ${msg.message.substring(0, 50)}...`);
           proactiveState.lastUserMessage = Date.now();
 
-          // PulseOS context is cached (refreshed every 5 min via interval) — no per-message refresh needed
+          // Load chat history for context + PulseOS context
+          let chatContext = "";
+          try {
+            const histRes = await fetch(`${PULSEOS_URL}/api/chat-history`);
+            const hist = await histRes.json() as { messages: Array<{ from: string; text: string }> };
+            const recent = (hist.messages || []).slice(-20);
+            if (recent.length > 0) {
+              chatContext = "\n\n## Vorheriger Chat-Verlauf (Dashboard):\n" +
+                recent.map(m => `${m.from === 'agent' ? 'Du' : 'User'}: ${m.text}`).join("\n");
+            }
+          } catch {}
+
           const [relevantContext, memoryContext] = await Promise.all([
             getRelevantContext(supabase, msg.message),
             getMemoryContext(supabase),
           ]);
 
-          const enrichedPrompt = buildPrompt(msg.message, relevantContext, memoryContext);
+          const enrichedPrompt = buildPrompt(msg.message, relevantContext, memoryContext, chatContext);
+          console.log(`[Dashboard] Calling Claude for: ${msg.message.substring(0, 50)}...`);
           const rawResponse = await callClaude(enrichedPrompt, { resume: true });
+          console.log(`[Dashboard] Raw response: ${rawResponse.substring(0, 100)}...`);
           const response = await processMemoryIntents(supabase, rawResponse);
+          console.log(`[Dashboard] Clean response: ${response.substring(0, 100)}...`);
 
           await saveMessage("user", `[Dashboard]: ${msg.message}`);
           await saveMessage("assistant", response);
+          console.log(`[Dashboard] Mirroring to PulseOS...`);
           await mirrorToPulseOS('agent', response);
+          console.log(`[Dashboard] Mirrored OK`);
 
           // Forward to Telegram so the conversation is visible there too
           try {
             await bot.api.sendMessage(ALLOWED_USER_ID, `💻 *Dashboard:* ${msg.message}`, { parse_mode: "Markdown" });
             await bot.api.sendMessage(ALLOWED_USER_ID, response);
+            console.log(`[Dashboard] Forwarded to Telegram OK`);
           } catch (e) { console.error("[PulseOS→TG] Forward failed:", e); }
         }
       }
@@ -738,7 +755,8 @@ const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolve
 function buildPrompt(
   userMessage: string,
   relevantContext?: string,
-  memoryContext?: string
+  memoryContext?: string,
+  chatHistory?: string
 ): string {
   const now = new Date();
   const timeStr = now.toLocaleString("en-US", {
@@ -778,6 +796,7 @@ function buildPrompt(
       "\n[DONE: search text for completed goal]"
   );
 
+  if (chatHistory) parts.push(chatHistory);
   parts.push(`\nUser: ${userMessage}`);
 
   return parts.join("\n");
