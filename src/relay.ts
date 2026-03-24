@@ -418,8 +418,9 @@ async function checkSmartCheckin(): Promise<void> {
     const checkinPrompt = [
       'Du bist ein proaktiver Assistent. Entscheide ob du den User jetzt kontaktieren solltest.',
       'Antworte NUR mit einem JSON-Objekt: {"shouldCheckin": true/false, "message": "deine Nachricht"}',
-      'Gründe für Check-in: Deadline naht, offener Task seit Tagen, Meeting bald, oder einfach ein freundlicher Check-in.',
+      'Gründe für Check-in: Deadline naht, offener Task seit Tagen, Meeting bald, ein freundlicher Check-in, oder ein Automatisierungs-Vorschlag.',
       'Gründe dagegen: Nichts Dringendes, bereits heute gecheckt, User ist wahrscheinlich beschäftigt.',
+      'Wenn du Muster erkennst (z.B. User checkt täglich Wetter/Tasks), schlage einen Graph vor: "Du checkst regelmäßig X — soll ich das automatisieren?"',
       `Der User war seit ${Math.round(inactiveMs / 60000)} Minuten inaktiv.`,
       `Heutige Check-ins bisher: ${proactiveState.checkinCount}`,
       `Aktuelle Zeit: ${now.toLocaleString('de-DE', { timeZone: USER_TIMEZONE, hour: '2-digit', minute: '2-digit', weekday: 'long' })}`,
@@ -696,6 +697,40 @@ async function refreshPulseOSContext(): Promise<void> {
 }
 await refreshPulseOSContext();
 setInterval(refreshPulseOSContext, 5 * 60 * 1000);
+
+// ── KPI Alert Check ──
+let lastKpiCheck = '';
+async function checkKPIAlerts(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastKpiCheck === today) return; // Once per day
+  const hours = new Date().getHours();
+  if (hours < 9 || hours >= 22) return; // Only after morning briefing
+
+  try {
+    const res = await fetch(`${PULSEOS_URL}/api/activity-summary?days=7`);
+    const data = await res.json() as { staleApps: string[]; activity: Array<{ name: string; daysAgo: number }> };
+    const alerts: string[] = [];
+
+    if (data.staleApps?.length >= 3) {
+      alerts.push(`${data.staleApps.length} Apps seit 3+ Tagen inaktiv: ${data.staleApps.slice(0, 3).join(', ')}`);
+    }
+
+    try {
+      const tasksRes = await fetch(`${PULSEOS_URL}/app/tasks/api/tasks`);
+      const td = await tasksRes.json() as { tasks: Array<{ done?: boolean; completed?: boolean; dueDate?: string; text?: string }> };
+      const overdue = (td.tasks || []).filter((t: any) => !t.done && !t.completed && t.dueDate && new Date(t.dueDate) < new Date());
+      if (overdue.length > 0) {
+        alerts.push(`${overdue.length} \u00fcberf\u00e4llige Tasks: ${overdue.slice(0, 2).map((t: any) => t.text || '?').join(', ')}`);
+      }
+    } catch {}
+
+    if (alerts.length > 0) {
+      lastKpiCheck = today;
+      await sendProactiveMessage(alerts.join('\n'), 'alert');
+    }
+  } catch {}
+}
+setInterval(checkKPIAlerts, 60 * 60_000);
 
 const USER_NAME = process.env.USER_NAME || "";
 const USER_TIMEZONE = process.env.USER_TIMEZONE || Intl.DateTimeFormat().resolvedOptions().timeZone;
