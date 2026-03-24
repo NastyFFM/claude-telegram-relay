@@ -466,6 +466,30 @@ async function sendHeartbeat(): Promise<void> {
 sendHeartbeat();
 setInterval(sendHeartbeat, 30_000); // Every 30 seconds
 
+// ── Sync Memories to PulseOS ──
+async function syncMemoriesToPulseOS(): Promise<void> {
+  if (!supabase) return;
+  try {
+    const [factsResult, goalsResult] = await Promise.all([
+      supabase.rpc("get_facts"),
+      supabase.rpc("get_active_goals"),
+    ]);
+    const memories = {
+      facts: (factsResult.data || []).map((f: any) => ({ content: f.content, id: f.id })),
+      goals: (goalsResult.data || []).map((g: any) => ({ content: g.content, deadline: g.deadline, id: g.id })),
+      synced: new Date().toISOString()
+    };
+    await fetch(`${PULSEOS_URL}/api/agent-memory`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(memories)
+    });
+    console.log(`[Memory] Synced ${memories.facts.length} facts, ${memories.goals.length} goals to PulseOS`);
+  } catch { /* PulseOS offline or no Supabase */ }
+}
+syncMemoriesToPulseOS();
+setInterval(syncMemoriesToPulseOS, 5 * 60_000); // Every 5 minutes
+
 // ============================================================
 // MESSAGE HANDLERS
 // ============================================================
