@@ -453,6 +453,19 @@ async function checkSmartCheckin(): Promise<void> {
 setInterval(checkMorningBriefing, 60_000);   // Every minute (checks time internally)
 setInterval(checkSmartCheckin, 30 * 60_000); // Every 30 minutes
 
+// ── Agent Presence Heartbeat ──
+async function sendHeartbeat(): Promise<void> {
+  try {
+    await fetch(`${PULSEOS_URL}/api/agent-heartbeat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentId: 'claudeos', type: 'chat', model: 'opus' })
+    });
+  } catch { /* PulseOS offline */ }
+}
+sendHeartbeat();
+setInterval(sendHeartbeat, 30_000); // Every 30 seconds
+
 // ============================================================
 // MESSAGE HANDLERS
 // ============================================================
