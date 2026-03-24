@@ -293,8 +293,9 @@ async function pollDashboardOutbox(): Promise<void> {
           let chatContext = "";
           try {
             const histRes = await fetch(`${PULSEOS_URL}/api/chat-history`);
-            const hist = await histRes.json() as { messages: Array<{ from: string; text: string }> };
-            const recent = (hist.messages || []).slice(-20);
+            const hist = await histRes.json() as { messages: Array<{ from: string; text: string; source?: string }> };
+            // Filter out pulseos-only messages to avoid ClaudeOS responding to PulseOS conversations
+            const recent = (hist.messages || []).filter(m => m.source !== 'pulseos').slice(-20);
             if (recent.length > 0) {
               chatContext = "\n\n## Vorheriger Chat-Verlauf (Dashboard):\n" +
                 recent.map(m => `${m.from === 'agent' ? 'Du' : 'User'}: ${m.text}`).join("\n");
