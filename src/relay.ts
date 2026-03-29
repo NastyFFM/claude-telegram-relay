@@ -204,7 +204,7 @@ async function callClaude(
 
   args.push("--output-format", "json");
 
-  console.log(`Calling Claude: ${prompt.substring(0, 50)}...`);
+  console.log(`Calling Claude: ${prompt.substring(0, 50)}... [mcp: ${mcpConfigPath}] [args: ${args.length}]`);
 
   try {
     const proc = spawn(args, {
