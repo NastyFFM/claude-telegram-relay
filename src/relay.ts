@@ -198,6 +198,10 @@ async function callClaude(
   // Enable tools: web search, read, bash, etc.
   args.push("--allowedTools", "WebSearch", "WebFetch", "Read", "Bash", "Glob", "Grep", "Edit", "Write");
 
+  // Load PulseOS MCP server
+  const mcpConfigPath = `${process.env.HOME}/.mcp.json`;
+  args.push("--mcp-config", mcpConfigPath);
+
   args.push("--output-format", "json");
 
   console.log(`Calling Claude: ${prompt.substring(0, 50)}...`);
