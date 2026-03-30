@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch",
+      "Read",
+      "Bash",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "mcp__supabase",
+      "mcp__github",
+      "mcp__filesystem",
+      "mcp__sequential-thinking"
+    ]
+  }
+}

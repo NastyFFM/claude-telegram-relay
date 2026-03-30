@@ -188,7 +188,7 @@ async function callClaude(
   prompt: string,
   options?: { resume?: boolean; imagePath?: string }
 ): Promise<string> {
-  const args = [CLAUDE_PATH, "-p", prompt];
+  const args = [CLAUDE_PATH, "-p", prompt, "--dangerously-skip-permissions"];
 
   // Resume previous session if available and requested
   if (options?.resume && session.sessionId) {
