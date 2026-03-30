@@ -270,6 +270,12 @@ async function callClaude(
 // PULSEOS BRIDGE
 // ============================================================
 
+// Clean markdown for Telegram: fix **url** patterns, ensure links are clean
+function cleanForTelegram(text: string): string {
+  // Remove ** around URLs (Claude wraps links in bold which breaks them)
+  return text.replace(/\*\*(https?:\/\/[^\s*]+)\*\*/g, '$1');
+}
+
 async function mirrorToPulseOS(from: 'user' | 'agent', text: string): Promise<void> {
   try {
     await fetch(`${PULSEOS_URL}/api/chat-mirror`, {
@@ -327,7 +333,7 @@ async function pollDashboardOutbox(): Promise<void> {
           // Forward to Telegram so the conversation is visible there too
           try {
             await bot.api.sendMessage(ALLOWED_USER_ID, `💻 *Dashboard:* ${msg.message}`, { parse_mode: "Markdown" });
-            await bot.api.sendMessage(ALLOWED_USER_ID, response);
+            await bot.api.sendMessage(ALLOWED_USER_ID, cleanForTelegram(response));
             console.log(`[Dashboard] Forwarded to Telegram OK`);
           } catch (e) { console.error("[PulseOS→TG] Forward failed:", e); }
         }
@@ -358,7 +364,7 @@ async function sendProactiveMessage(text: string, type: 'briefing' | 'checkin' |
   const prefix = type === 'briefing' ? '☀️' : type === 'checkin' ? '💡' : '🔔';
   const fullText = `${prefix} ${text}`;
   try {
-    await bot.api.sendMessage(ALLOWED_USER_ID, fullText);
+    await bot.api.sendMessage(ALLOWED_USER_ID, cleanForTelegram(fullText));
   } catch (e) { console.error(`[Proactive→TG] Send failed:`, e); }
   await mirrorToPulseOS('agent', fullText);
   // Also send as agent-alert for Agent-Bar pulsing
